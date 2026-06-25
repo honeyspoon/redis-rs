@@ -1,6 +1,7 @@
 use super::AsyncDNSResolver;
 use super::RedisRuntime;
 
+use crate::client::AsyncConnectionAddrSelection;
 use crate::connection::{ConnectionAddr, ConnectionInfo};
 #[cfg(feature = "aio")]
 use crate::types::RedisResult;
@@ -10,21 +11,31 @@ use crate::cmd::{cmd, pipe};
 use crate::pipeline::Pipeline;
 use crate::{FromRedisValue, RedisError, ToRedisArgs};
 use futures_util::future::select_ok;
-use std::future::Future;
+use std::{future::Future, net::SocketAddr};
 
 pub(crate) async fn connect_simple<T: RedisRuntime>(
     connection_info: &ConnectionInfo,
     dns_resolver: &dyn AsyncDNSResolver,
+    connection_addr_selection: AsyncConnectionAddrSelection,
 ) -> RedisResult<T> {
     Ok(match connection_info.addr {
         ConnectionAddr::Tcp(ref host, port) => {
             let socket_addrs = dns_resolver.resolve(host, port).await?;
-            select_ok(
-                socket_addrs
-                    .map(|addr| Box::pin(<T>::connect_tcp(addr, &connection_info.tcp_settings))),
-            )
-            .await?
-            .0
+            match connection_addr_selection {
+                AsyncConnectionAddrSelection::Race => {
+                    select_ok(socket_addrs.map(|addr| {
+                        Box::pin(<T>::connect_tcp(addr, &connection_info.tcp_settings))
+                    }))
+                    .await?
+                    .0
+                }
+                AsyncConnectionAddrSelection::Sequential => {
+                    connect_sequential(socket_addrs, |addr| {
+                        <T>::connect_tcp(addr, &connection_info.tcp_settings)
+                    })
+                    .await?
+                }
+            }
         }
 
         #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
@@ -35,17 +46,33 @@ pub(crate) async fn connect_simple<T: RedisRuntime>(
             ref tls_params,
         } => {
             let socket_addrs = dns_resolver.resolve(host, port).await?;
-            select_ok(socket_addrs.map(|socket_addr| {
-                Box::pin(<T>::connect_tcp_tls(
-                    host,
-                    socket_addr,
-                    insecure,
-                    tls_params,
-                    &connection_info.tcp_settings,
-                ))
-            }))
-            .await?
-            .0
+            match connection_addr_selection {
+                AsyncConnectionAddrSelection::Race => {
+                    select_ok(socket_addrs.map(|socket_addr| {
+                        Box::pin(<T>::connect_tcp_tls(
+                            host,
+                            socket_addr,
+                            insecure,
+                            tls_params,
+                            &connection_info.tcp_settings,
+                        ))
+                    }))
+                    .await?
+                    .0
+                }
+                AsyncConnectionAddrSelection::Sequential => {
+                    connect_sequential(socket_addrs, |socket_addr| {
+                        <T>::connect_tcp_tls(
+                            host,
+                            socket_addr,
+                            insecure,
+                            tls_params,
+                            &connection_info.tcp_settings,
+                        )
+                    })
+                    .await?
+                }
+            }
         }
 
         #[cfg(not(any(feature = "tls-native-tls", feature = "tls-rustls")))]
@@ -68,6 +95,28 @@ pub(crate) async fn connect_simple<T: RedisRuntime>(
             ))
         }
     })
+}
+
+async fn connect_sequential<T, I, F, Fut>(socket_addrs: I, mut connect: F) -> RedisResult<T>
+where
+    I: Iterator<Item = SocketAddr>,
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = RedisResult<T>>,
+{
+    let mut last_error = None;
+    for socket_addr in socket_addrs {
+        match connect(socket_addr).await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        RedisError::from((
+            crate::errors::ErrorKind::InvalidClientConfig,
+            "No address found for host",
+        ))
+    }))
 }
 
 /// Executes a Redis transaction asynchronously by automatically watching keys and running
@@ -167,6 +216,11 @@ mod tests {
     use crate::cluster_async;
 
     use super::super::*;
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn test_is_sync() {
@@ -192,5 +246,48 @@ mod tests {
         assert_send::<ConnectionManager>();
         #[cfg(feature = "cluster-async")]
         assert_send::<cluster_async::ClusterConnection>();
+    }
+
+    #[test]
+    fn connect_sequential_uses_first_successful_address() {
+        futures::executor::block_on(async {
+            let first_addr: SocketAddr = "127.0.0.1:6379".parse().expect("valid socket address");
+            let second_addr: SocketAddr = "127.0.0.1:6380".parse().expect("valid socket address");
+            let attempts = Arc::new(AtomicUsize::new(0));
+
+            let selected = connect_sequential([first_addr, second_addr].into_iter(), {
+                let attempts = attempts.clone();
+                move |addr| {
+                    let attempts = attempts.clone();
+                    async move {
+                        if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                            Err(RedisError::from((
+                                crate::errors::ErrorKind::Io,
+                                "synthetic connection failure",
+                            )))
+                        } else {
+                            Ok(addr)
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("second address should connect");
+
+            assert_eq!(selected, second_addr);
+            assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        });
+    }
+
+    #[test]
+    fn connect_sequential_rejects_empty_address_list() {
+        let result = futures::executor::block_on(async {
+            connect_sequential(std::iter::empty(), |_addr| async move {
+                Ok::<_, RedisError>(())
+            })
+            .await
+        });
+
+        assert!(result.is_err());
     }
 }

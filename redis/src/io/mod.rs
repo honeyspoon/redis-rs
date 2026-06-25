@@ -5,4 +5,4 @@ pub mod tcp;
 mod dns;
 
 #[cfg(feature = "aio")]
-pub use dns::AsyncDNSResolver;
+pub use dns::{AsyncDNSResolver, RoundRobinDnsResolver};

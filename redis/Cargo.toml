@@ -260,6 +260,10 @@ name = "async-await"
 required-features = ["tokio-comp"]
 
 [[example]]
+name = "async-round-robin-dns"
+required-features = ["tokio-comp"]
+
+[[example]]
 name = "async-resp2-pub-sub"
 required-features = ["tokio-comp"]
 

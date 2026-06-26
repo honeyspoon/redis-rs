@@ -4,6 +4,8 @@ use crate::aio::AsyncPushSender;
 use crate::auth::StreamingCredentialsProvider;
 #[cfg(all(feature = "cache-aio", feature = "cluster-async"))]
 use crate::caching::{CacheConfig, CacheManager};
+#[cfg(feature = "cluster-async")]
+use crate::client::AsyncConnectionAddrSelection;
 use crate::client::DEFAULT_CONNECTION_TIMEOUT;
 use crate::cluster_handling::read_routing::{RandomReplicaStrategy, ReadRoutingStrategyFactory};
 use crate::connection::{ConnectionAddr, ConnectionInfo, IntoConnectionInfo};
@@ -61,6 +63,8 @@ struct BuilderParams {
     pub(crate) tcp_settings: TcpSettings,
     #[cfg(feature = "cluster-async")]
     async_dns_resolver: Option<Arc<dyn AsyncDNSResolver>>,
+    #[cfg(feature = "cluster-async")]
+    connection_addr_selection: AsyncConnectionAddrSelection,
     #[cfg(feature = "cache-aio")]
     cache_config: Option<CacheConfig>,
     #[cfg(all(feature = "token-based-authentication", feature = "cluster-async"))]
@@ -147,6 +151,8 @@ pub(crate) struct ClusterParams {
     pub(crate) tcp_settings: TcpSettings,
     #[cfg(feature = "cluster-async")]
     pub(crate) async_dns_resolver: Option<Arc<dyn AsyncDNSResolver>>,
+    #[cfg(feature = "cluster-async")]
+    pub(crate) connection_addr_selection: AsyncConnectionAddrSelection,
     #[cfg(all(feature = "cache-aio", feature = "cluster-async"))]
     pub(crate) cache_manager: Option<CacheManager>,
     #[cfg(all(feature = "token-based-authentication", feature = "cluster-async"))]
@@ -208,6 +214,8 @@ impl ClusterParams {
             tcp_settings: value.tcp_settings,
             #[cfg(feature = "cluster-async")]
             async_dns_resolver: value.async_dns_resolver,
+            #[cfg(feature = "cluster-async")]
+            connection_addr_selection: value.connection_addr_selection,
             #[cfg(all(feature = "cache-aio", feature = "cluster-async"))]
             cache_manager,
             #[cfg(all(feature = "token-based-authentication", feature = "cluster-async"))]
@@ -236,6 +244,11 @@ impl ClusterParams {
         #[cfg(feature = "cluster-async")]
         if let Some(async_dns_resolver) = config.async_dns_resolver {
             self.async_dns_resolver = Some(async_dns_resolver);
+        }
+
+        #[cfg(feature = "cluster-async")]
+        if let Some(connection_addr_selection) = config.connection_addr_selection {
+            self.connection_addr_selection = connection_addr_selection;
         }
 
         self
@@ -640,6 +653,19 @@ impl ClusterClientBuilder {
         self
     }
 
+    /// Set how async TCP connection attempts use addresses returned by DNS resolution.
+    ///
+    /// The default is [`AsyncConnectionAddrSelection::Race`], which preserves the
+    /// existing redis-rs behavior of racing all returned socket addresses.
+    #[cfg(feature = "cluster-async")]
+    pub fn async_connection_addr_selection(
+        mut self,
+        connection_addr_selection: AsyncConnectionAddrSelection,
+    ) -> ClusterClientBuilder {
+        self.builder_params.connection_addr_selection = connection_addr_selection;
+        self
+    }
+
     /// Sets cache config for [`crate::cluster_async::ClusterConnection`], check CacheConfig for more details.
     #[cfg(all(feature = "cache-aio", feature = "cluster-async"))]
     pub fn cache_config(mut self, cache_config: CacheConfig) -> Self {
@@ -816,6 +842,8 @@ impl ClusterClient {
 #[cfg(test)]
 mod tests {
     use super::{ClusterClient, ClusterClientBuilder, ConnectionInfo, IntoConnectionInfo};
+    #[cfg(feature = "cluster-async")]
+    use crate::client::AsyncConnectionAddrSelection;
     use std::time::Duration;
 
     fn get_connection_data() -> Vec<ConnectionInfo> {
@@ -1071,6 +1099,63 @@ mod tests {
         assert_eq!(
             client.cluster_params.connection_concurrency_limit,
             Some(128)
+        );
+    }
+
+    #[cfg(feature = "cluster-async")]
+    #[test]
+    fn connection_addr_selection_defaults_to_race() {
+        let client = ClusterClient::new(get_connection_data()).unwrap();
+        assert_eq!(
+            client.cluster_params.connection_addr_selection,
+            AsyncConnectionAddrSelection::Race
+        );
+    }
+
+    #[cfg(feature = "cluster-async")]
+    #[test]
+    fn connection_addr_selection_custom() {
+        let client = ClusterClientBuilder::new(get_connection_data())
+            .async_connection_addr_selection(AsyncConnectionAddrSelection::Sequential)
+            .build()
+            .unwrap();
+        assert_eq!(
+            client.cluster_params.connection_addr_selection,
+            AsyncConnectionAddrSelection::Sequential
+        );
+    }
+
+    #[cfg(feature = "cluster-async")]
+    #[test]
+    fn connection_addr_selection_config_overrides_builder() {
+        let client = ClusterClientBuilder::new(get_connection_data())
+            .async_connection_addr_selection(AsyncConnectionAddrSelection::Sequential)
+            .build()
+            .unwrap();
+        let params = client.cluster_params.clone().with_config(
+            crate::cluster::ClusterConfig::new()
+                .set_connection_addr_selection(AsyncConnectionAddrSelection::Race),
+        );
+        assert_eq!(
+            params.connection_addr_selection,
+            AsyncConnectionAddrSelection::Race
+        );
+    }
+
+    #[cfg(feature = "cluster-async")]
+    #[test]
+    fn connection_addr_selection_config_keeps_builder_default_when_unset() {
+        let client = ClusterClientBuilder::new(get_connection_data())
+            .async_connection_addr_selection(AsyncConnectionAddrSelection::Sequential)
+            .build()
+            .unwrap();
+        let params = client
+            .cluster_params
+            .clone()
+            .with_config(crate::cluster::ClusterConfig::new());
+        assert_eq!(
+            params.connection_addr_selection,
+            AsyncConnectionAddrSelection::Sequential
         );
     }
 

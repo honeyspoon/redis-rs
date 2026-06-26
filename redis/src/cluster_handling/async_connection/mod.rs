@@ -1525,6 +1525,7 @@ where
     if let Some(resolver) = &params.async_dns_resolver {
         config = config.set_dns_resolver_internal(resolver.clone());
     }
+    config = config.set_connection_addr_selection(params.connection_addr_selection.clone());
     #[cfg(feature = "cache-aio")]
     if let Some(cache_manager) = &params.cache_manager {
         config = config.set_cache_manager(cache_manager.clone_and_increase_epoch());

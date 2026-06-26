@@ -183,7 +183,8 @@ pub(crate) const DEFAULT_CONNECTION_TIMEOUT: Option<Duration> = Some(Duration::f
 
 /// Controls how async TCP connection attempts use addresses returned by DNS resolution.
 #[cfg(feature = "aio")]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum AsyncConnectionAddrSelection {
     /// Race connection attempts to all resolved socket addresses and use the first
     /// successful connection.
@@ -577,7 +578,7 @@ impl Client {
             .as_deref()
             .unwrap_or(&DefaultAsyncDNSResolver);
         let con = self
-            .get_simple_async_connection::<T>(resolver, config.connection_addr_selection)
+            .get_simple_async_connection::<T>(resolver, config.connection_addr_selection.clone())
             .await?;
         crate::aio::MultiplexedConnection::new_with_config(
             &self.connection_info.redis,

@@ -235,6 +235,8 @@ pub struct ClusterConfig {
     pub(crate) async_push_sender: Option<std::sync::Arc<dyn crate::aio::AsyncPushSender>>,
     #[cfg(feature = "cluster-async")]
     pub(crate) async_dns_resolver: Option<std::sync::Arc<dyn crate::io::AsyncDNSResolver>>,
+    #[cfg(feature = "cluster-async")]
+    pub(crate) connection_addr_selection: Option<crate::io::AsyncConnectionAddrSelection>,
 }
 
 impl ClusterConfig {
@@ -291,6 +293,19 @@ impl ClusterConfig {
     #[cfg(feature = "cluster-async")]
     pub fn set_dns_resolver(mut self, resolver: impl crate::io::AsyncDNSResolver) -> Self {
         self.async_dns_resolver = Some(std::sync::Arc::new(resolver));
+        self
+    }
+
+    /// Set how async TCP connection attempts use addresses returned by DNS resolution.
+    ///
+    /// The default is [`crate::AsyncConnectionAddrSelection::Race`], which preserves the
+    /// existing redis-rs behavior of racing all returned socket addresses.
+    #[cfg(feature = "cluster-async")]
+    pub fn set_connection_addr_selection(
+        mut self,
+        connection_addr_selection: crate::io::AsyncConnectionAddrSelection,
+    ) -> Self {
+        self.connection_addr_selection = Some(connection_addr_selection);
         self
     }
 }

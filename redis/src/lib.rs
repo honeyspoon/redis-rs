@@ -719,6 +719,8 @@ pub use crate::errors::{
     ErrorKind, ParsingError, RedisError, RetryMethod, ServerError, ServerErrorKind,
     make_extension_error,
 };
+#[cfg(feature = "aio")]
+pub use crate::io::AsyncConnectionAddrSelection;
 
 #[cfg(feature = "aio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "aio")))]

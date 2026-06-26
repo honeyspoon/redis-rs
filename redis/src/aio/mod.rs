@@ -4,12 +4,11 @@ use crate::connection::{
     AuthResult, ConnectionSetupComponents, RedisConnectionInfo, check_connection_setup,
     connection_setup_pipeline,
 };
-use crate::io::AsyncDNSResolver;
 use crate::types::{RedisFuture, RedisResult, Value};
-use crate::{ErrorKind, PushInfo, RedisError, errors::closed_connection_error};
+use crate::{PushInfo, RedisError, errors::closed_connection_error};
 use ::tokio::io::{AsyncRead, AsyncWrite};
 use futures_util::{
-    future::{Future, FutureExt},
+    future::Future,
     sink::{Sink, SinkExt},
     stream::{Stream, StreamExt},
 };
@@ -227,45 +226,5 @@ where
 {
     fn send(&self, info: PushInfo) -> Result<(), SendError> {
         self.as_ref().send(info)
-    }
-}
-
-/// Default DNS resolver which uses the system's DNS resolver.
-#[derive(Clone)]
-pub(crate) struct DefaultAsyncDNSResolver;
-
-impl AsyncDNSResolver for DefaultAsyncDNSResolver {
-    fn resolve<'a, 'b: 'a>(
-        &'a self,
-        host: &'b str,
-        port: u16,
-    ) -> RedisFuture<'a, Box<dyn Iterator<Item = SocketAddr> + Send + 'a>> {
-        Box::pin(get_socket_addrs(host, port).map(|vec| {
-            Ok(Box::new(vec?.into_iter()) as Box<dyn Iterator<Item = SocketAddr> + Send>)
-        }))
-    }
-}
-
-async fn get_socket_addrs(host: &str, port: u16) -> RedisResult<Vec<SocketAddr>> {
-    let socket_addrs: Vec<_> = match Runtime::locate() {
-        #[cfg(feature = "tokio-comp")]
-        Runtime::Tokio => ::tokio::net::lookup_host((host, port))
-            .await
-            .map_err(RedisError::from)
-            .map(|iter| iter.collect()),
-
-        #[cfg(feature = "smol-comp")]
-        Runtime::Smol => ::smol::net::resolve((host, port))
-            .await
-            .map_err(RedisError::from),
-    }?;
-
-    if socket_addrs.is_empty() {
-        Err(RedisError::from((
-            ErrorKind::InvalidClientConfig,
-            "No address found for host",
-        )))
-    } else {
-        Ok(socket_addrs)
     }
 }

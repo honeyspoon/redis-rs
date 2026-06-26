@@ -5,4 +5,6 @@ pub mod tcp;
 mod dns;
 
 #[cfg(feature = "aio")]
-pub use dns::AsyncDNSResolver;
+pub(crate) use dns::DefaultAsyncDNSResolver;
+#[cfg(feature = "aio")]
+pub use dns::{AsyncConnectionAddrSelection, AsyncDNSResolver};

@@ -2,7 +2,8 @@ use super::{AsyncPushSender, HandleContainer, RedisFuture};
 #[cfg(feature = "cache-aio")]
 use crate::caching::CacheManager;
 use crate::{
-    AsyncConnectionConfig, Client, Cmd, Pipeline, PushInfo, PushKind, ToRedisArgs,
+    AsyncConnectionAddrSelection, AsyncConnectionConfig, Client, Cmd, Pipeline, PushInfo, PushKind,
+    ToRedisArgs,
     aio::{ConnectionLike, MultiplexedConnection, Runtime},
     check_resp3,
     client::{DEFAULT_CONNECTION_TIMEOUT, DEFAULT_RESPONSE_TIMEOUT},
@@ -38,6 +39,8 @@ pub struct ConnectionManagerConfig {
     response_timeout: Option<Duration>,
     /// Each connection attempt to the server will time out after `connection_timeout`.
     connection_timeout: Option<Duration>,
+    /// How async TCP connection attempts use addresses returned by DNS resolution.
+    connection_addr_selection: AsyncConnectionAddrSelection,
     /// sender channel for push values
     push_sender: Option<Arc<dyn AsyncPushSender>>,
     /// if true, the manager should resubscribe automatically to all pubsub channels after reconnect.
@@ -60,6 +63,7 @@ impl std::fmt::Debug for ConnectionManagerConfig {
             max_delay,
             response_timeout,
             connection_timeout,
+            connection_addr_selection,
             push_sender,
             resubscribe_automatically,
             #[cfg(feature = "cache-aio")]
@@ -76,6 +80,7 @@ impl std::fmt::Debug for ConnectionManagerConfig {
             .field("number_of_retries", &number_of_retries)
             .field("response_timeout", &response_timeout)
             .field("connection_timeout", &connection_timeout)
+            .field("connection_addr_selection", &connection_addr_selection)
             .field("resubscribe_automatically", &resubscribe_automatically)
             .field("pipeline_buffer_size", &pipeline_buffer_size)
             .field("concurrency_limit", &concurrency_limit)
@@ -149,6 +154,11 @@ impl ConnectionManagerConfig {
         self.connection_timeout
     }
 
+    /// Returns how async TCP connection attempts use addresses returned by DNS resolution.
+    pub fn connection_addr_selection(&self) -> &AsyncConnectionAddrSelection {
+        &self.connection_addr_selection
+    }
+
     /// Returns `true` if automatic resubscription is enabled after reconnecting.
     pub fn automatic_resubscription(&self) -> bool {
         self.resubscribe_automatically
@@ -198,6 +208,18 @@ impl ConnectionManagerConfig {
     /// Set `None` if you don't want the connection attempt to time out.
     pub fn set_connection_timeout(mut self, duration: Option<Duration>) -> ConnectionManagerConfig {
         self.connection_timeout = duration;
+        self
+    }
+
+    /// Set how async TCP connection attempts use addresses returned by DNS resolution.
+    ///
+    /// The default is [`AsyncConnectionAddrSelection::Race`], which preserves the
+    /// existing redis-rs behavior of racing all returned socket addresses.
+    pub fn set_connection_addr_selection(
+        mut self,
+        connection_addr_selection: AsyncConnectionAddrSelection,
+    ) -> Self {
+        self.connection_addr_selection = connection_addr_selection;
         self
     }
 
@@ -313,6 +335,7 @@ impl Default for ConnectionManagerConfig {
             number_of_retries: Self::DEFAULT_NUMBER_OF_CONNECTION_RETRIES,
             response_timeout: DEFAULT_RESPONSE_TIMEOUT,
             connection_timeout: DEFAULT_CONNECTION_TIMEOUT,
+            connection_addr_selection: Default::default(),
             push_sender: None,
             resubscribe_automatically: false,
             #[cfg(feature = "cache-aio")]
@@ -473,7 +496,8 @@ impl ConnectionManager {
 
         let mut connection_config = AsyncConnectionConfig::new()
             .set_connection_timeout(config.connection_timeout)
-            .set_response_timeout(config.response_timeout);
+            .set_response_timeout(config.response_timeout)
+            .set_connection_addr_selection(config.connection_addr_selection.clone());
         connection_config.pipeline_buffer_size = config.pipeline_buffer_size;
         connection_config.concurrency_limit = config.concurrency_limit;
 
@@ -863,7 +887,34 @@ mod tests {
     }
 
     #[test]
+    fn test_connection_manager_config_addr_selection_default() {
+        let config = ConnectionManagerConfig::new();
+        assert_eq!(
+            config.connection_addr_selection,
+            AsyncConnectionAddrSelection::Race
+        );
+    }
+
+    #[test]
+    fn test_connection_manager_config_addr_selection_custom() {
+        let config = ConnectionManagerConfig::new()
+            .set_connection_addr_selection(AsyncConnectionAddrSelection::Sequential);
+        assert_eq!(
+            config.connection_addr_selection,
+            AsyncConnectionAddrSelection::Sequential
+        );
+    }
+
+    #[test]
     fn test_lazy_connection_manager_with_config() {
+        #[cfg(feature = "tokio-comp")]
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        #[cfg(feature = "tokio-comp")]
+        let _guard = runtime.enter();
+
         // Test that lazy connection manager can be created with custom config
         let client = Client::open("redis://127.0.0.1/").unwrap();
         let config = ConnectionManagerConfig::new()
